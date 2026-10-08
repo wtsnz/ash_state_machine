@@ -131,26 +131,38 @@ defmodule AshStateMachine do
 
   @doc """
   A utility to transition the state of a changeset, honoring the rules of the resource.
+
+  On an update, the transition is checked against `changeset.data`, and the update also
+  requires the stored state to be one the transition can start from. If the record has
+  moved to another state since it was read, the update fails with
+  `Ash.Error.Changes.StaleRecord` instead of overwriting that state.
   """
-  def transition_state(changeset, target) when is_binary(target) do
-    transition_state(changeset, String.to_existing_atom(target))
+  def transition_state(changeset, target), do: transition_state(changeset, target, [])
+
+  @doc false
+  def transition_state(changeset, target, opts) when is_binary(target) do
+    transition_state(changeset, String.to_existing_atom(target), opts)
   rescue
     _ ->
       no_such_state(changeset, target)
   end
 
-  def transition_state(%{action_type: :update} = changeset, target) do
+  def transition_state(%{action_type: :update} = changeset, target, opts) do
     attribute = AshStateMachine.Info.state_machine_state_attribute!(changeset.resource)
     old_state = Map.get(changeset.data, attribute)
 
     if target in AshStateMachine.Info.state_machine_all_states(changeset.resource) do
-      find_and_perform_transition(changeset, old_state, attribute, target)
+      find_and_perform_transition(changeset, old_state, attribute, target, opts)
     else
       no_such_state(changeset, target)
     end
   end
 
-  def transition_state(%{action_type: :create, action: %{upsert?: true}} = changeset, target) do
+  def transition_state(
+        %{action_type: :create, action: %{upsert?: true}} = changeset,
+        target,
+        _opts
+      ) do
     attribute = AshStateMachine.Info.state_machine_state_attribute!(changeset.resource)
     old_state = Map.get(changeset.data, attribute)
 
@@ -166,7 +178,7 @@ defmodule AshStateMachine do
     end
   end
 
-  def transition_state(%{action_type: :create} = changeset, target) do
+  def transition_state(%{action_type: :create} = changeset, target, _opts) do
     attribute = AshStateMachine.Info.state_machine_state_attribute!(changeset.resource)
 
     if target in AshStateMachine.Info.state_machine_initial_states!(changeset.resource) do
@@ -176,13 +188,15 @@ defmodule AshStateMachine do
     end
   end
 
-  def transition_state(other, _target) do
+  def transition_state(other, _target, _opts) do
     Ash.Changeset.add_error(other, "Can't transition states on destroy actions")
   end
 
-  defp find_and_perform_transition(changeset, old_state, attribute, target) do
-    changeset.resource
-    |> AshStateMachine.Info.state_machine_transitions(changeset.action.name)
+  defp find_and_perform_transition(changeset, old_state, attribute, target, opts) do
+    transitions =
+      AshStateMachine.Info.state_machine_transitions(changeset.resource, changeset.action.name)
+
+    transitions
     |> Enum.find(fn transition ->
       old_state in List.wrap(transition.from) and target in List.wrap(transition.to)
     end)
@@ -191,7 +205,35 @@ defmodule AshStateMachine do
         no_matching_transition(changeset, target, old_state)
 
       _transition ->
-        Ash.Changeset.force_change_attribute(changeset, attribute, target)
+        changeset
+        |> Ash.Changeset.force_change_attribute(attribute, target)
+        |> then(fn changeset ->
+          if Keyword.get(opts, :require_stored_state?, true) do
+            require_stored_state(changeset, transitions, attribute, target)
+          else
+            changeset
+          end
+        end)
+    end
+  end
+
+  # `changeset.data` is the caller's copy, unless a change such as
+  # `get_and_lock_for_update/0` has refetched it. Add the valid from-states to
+  # the update's filter as well, so that a record that has moved on isn't
+  # overwritten.
+  defp require_stored_state(changeset, transitions, attribute, target) do
+    import Ash.Expr, only: [expr: 1, ref: 1]
+
+    from_states =
+      transitions
+      |> Enum.filter(&(target in List.wrap(&1.to) or :* in List.wrap(&1.to)))
+      |> Enum.flat_map(&List.wrap(&1.from))
+      |> Enum.uniq()
+
+    if :* in from_states do
+      changeset
+    else
+      Ash.Changeset.filter(changeset, expr(^ref(attribute) in ^from_states))
     end
   end
 

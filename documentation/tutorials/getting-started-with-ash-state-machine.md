@@ -198,6 +198,31 @@ Note: You must define transitions for your actions. If you call
 `change transition_state` and there isn't a matching `from` and
 `to` state, the action will fail.
 
+## Transitions and concurrent updates
+
+In an atomic update (the default), the transition is checked by the
+data layer against the stored state, as part of the update itself.
+
+In a non-atomic update (`require_atomic? false`), `transition_state`
+checks the record that was passed to the action, which may be out of
+date. The update also requires the stored state to be one the
+transition can start from, so a record that has moved on fails with
+`Ash.Error.Changes.StaleRecord` instead of being overwritten.
+
+If the action locks the record first, declare the lock before
+`transition_state`. The transition is then checked again against the
+locked record, and fails with `NoMatchingTransition` before the rest
+of the action runs:
+
+```elixir
+update :confirm_payment do
+  require_atomic? false
+  change get_and_lock_for_update()
+  change transition_state(:paid)
+  change AllocateOrderNumber
+end
+```
+
 
 # Conditional state transitions
 
