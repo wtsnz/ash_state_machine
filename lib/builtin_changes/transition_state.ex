@@ -7,8 +7,22 @@ defmodule AshStateMachine.BuiltinChanges.TransitionState do
   use Ash.Resource.Change
 
   def change(changeset, opts, _) do
-    AshStateMachine.transition_state(changeset, opts[:target])
+    changeset = AshStateMachine.transition_state(changeset, opts[:target])
+
+    if recheck_after_hooks?(changeset) do
+      Ash.Changeset.before_action(changeset, &AshStateMachine.transition_state(&1, opts[:target]))
+    else
+      changeset
+    end
   end
+
+  # Changes such as `get_and_lock_for_update/0` refetch `changeset.data` in a
+  # `before_action` hook, after `change/3` has checked the caller's copy. When an
+  # earlier change has added such a hook, check the same target again once it has
+  # run. The hook is only added in that case, so that an action that could
+  # otherwise be upgraded to an atomic update still can be.
+  defp recheck_after_hooks?(%{action_type: :update, before_action: [_ | _]}), do: true
+  defp recheck_after_hooks?(_changeset), do: false
 
   def atomic(changeset, opts, _) do
     transitions =

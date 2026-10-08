@@ -131,6 +131,12 @@ defmodule AshStateMachine do
 
   @doc """
   A utility to transition the state of a changeset, honoring the rules of the resource.
+
+  On an update, the transition is checked against `changeset.data`, and the update also
+  requires the stored state to be one the transition can start from. If the stored state
+  no longer permits the transition, the update fails with `Ash.Error.Changes.StaleRecord`
+  instead of overwriting it. This relies on the data layer applying the changeset's
+  filter in the update itself, as AshPostgres does.
   """
   def transition_state(changeset, target) when is_binary(target) do
     transition_state(changeset, String.to_existing_atom(target))
@@ -181,8 +187,10 @@ defmodule AshStateMachine do
   end
 
   defp find_and_perform_transition(changeset, old_state, attribute, target) do
-    changeset.resource
-    |> AshStateMachine.Info.state_machine_transitions(changeset.action.name)
+    transitions =
+      AshStateMachine.Info.state_machine_transitions(changeset.resource, changeset.action.name)
+
+    transitions
     |> Enum.find(fn transition ->
       old_state in List.wrap(transition.from) and target in List.wrap(transition.to)
     end)
@@ -191,8 +199,27 @@ defmodule AshStateMachine do
         no_matching_transition(changeset, target, old_state)
 
       _transition ->
-        Ash.Changeset.force_change_attribute(changeset, attribute, target)
+        changeset
+        |> Ash.Changeset.force_change_attribute(attribute, target)
+        |> require_stored_state(transitions, attribute, target)
     end
+  end
+
+  # `changeset.data` is the caller's copy, unless a change such as
+  # `get_and_lock_for_update/0` has refetched it. Add the states the target can
+  # be reached from to the update's filter as well, so that a record whose
+  # stored state no longer permits the transition isn't overwritten. `:*` has
+  # already been expanded into the declared states.
+  defp require_stored_state(changeset, transitions, attribute, target) do
+    import Ash.Expr, only: [expr: 1, ref: 1]
+
+    from_states =
+      transitions
+      |> Enum.filter(&(target in List.wrap(&1.to)))
+      |> Enum.flat_map(&List.wrap(&1.from))
+      |> Enum.uniq()
+
+    Ash.Changeset.filter(changeset, expr(^ref(attribute) in ^from_states))
   end
 
   @doc false

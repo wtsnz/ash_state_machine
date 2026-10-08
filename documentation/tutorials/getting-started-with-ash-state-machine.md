@@ -198,6 +198,51 @@ Note: You must define transitions for your actions. If you call
 `change transition_state` and there isn't a matching `from` and
 `to` state, the action will fail.
 
+## Transitions and concurrent updates
+
+In an atomic update (the default), the transition is checked by the
+data layer against the stored state, as part of the update itself.
+
+In a non-atomic update (`require_atomic? false`), `transition_state`
+checks the record that was passed to the action, which may be out of
+date. The update also requires the stored state to be one the
+transition can start from, so if the stored state no longer permits
+the transition, the update fails with `Ash.Error.Changes.StaleRecord`
+instead of overwriting it. This relies on the data layer applying the
+filter in the update itself, as AshPostgres does. In a bulk update
+using the `:stream` strategy, Ash skips such a record rather than
+returning an error.
+
+If the action locks the record first, declare the lock before
+`transition_state`. The same transition is then checked again against
+the locked record, and fails with `NoMatchingTransition` before later
+`before_action` hooks and the update run. Changes and validations that
+run while the changeset is built still see the record that was passed
+in. `next_state` chooses its target from that record too, and the
+target is checked against the locked record, not chosen again.
+
+```elixir
+update :confirm_payment do
+  require_atomic? false
+  change get_and_lock_for_update()
+  change transition_state(:paid)
+  change AllocateOrderNumber
+end
+```
+
+Alternatively, `always_atomic?: true` makes the data layer check the
+transition as part of the update, even in a non-atomic action. The
+check then happens when the update runs, after the action's
+`before_action` hooks:
+
+```elixir
+update :confirm_payment do
+  require_atomic? false
+  change get_and_lock_for_update()
+  change transition_state(:paid), always_atomic?: true
+  change AllocateOrderNumber
+end
+```
 
 # Conditional state transitions
 
