@@ -12,5 +12,6 @@ defmodule Domain do
     resource NextStateMachine
     resource Verification
     resource RefetchedOrder
+    resource GuardedOrder
   end
 end

@@ -21,10 +21,12 @@ defmodule AshStateMachine.StaleDataTest do
     assert stored_state(stale) == :paid
   end
 
-  test "next_state after a refetch picks the next state of the refetched record",
+  test "next_state after a refetch checks its target against the refetched record",
        %{stale: stale} do
-    assert RefetchedOrder.advance_after_refetch!(stale).state == :shipped
-    assert stored_state(stale) == :shipped
+    assert {:error, %Ash.Error.Invalid{errors: [%AshStateMachine.Errors.NoMatchingTransition{}]}} =
+             RefetchedOrder.advance_after_refetch(stale)
+
+    assert stored_state(stale) == :paid
   end
 
   test "a non-atomic transition doesn't overwrite a state it can't start from",
@@ -45,5 +47,32 @@ defmodule AshStateMachine.StaleDataTest do
 
     assert RefetchedOrder.cancel_after_refetch!(order).state == :cancelled
     assert stored_state(order) == :cancelled
+  end
+
+  # `next_state/0` mustn't choose a different target from the refetched record
+  # after changes, validations and policies have used the one it chose first.
+  describe "next_state with a stale copy and a refetch" do
+    setup do
+      stale = Ash.create!(GuardedOrder, %{}, authorize?: false)
+      Ash.update!(stale, %{}, action: :pay, authorize?: false)
+      %{stale: stale}
+    end
+
+    defp guarded_state(order), do: Ash.get!(GuardedOrder, order.id, authorize?: false).state
+
+    test "keeps later changes consistent with the target", %{stale: stale} do
+      assert {:error, _} = Ash.update(stale, %{}, action: :advance_with_note, authorize?: false)
+      assert guarded_state(stale) == :paid
+    end
+
+    test "honours validations of the target", %{stale: stale} do
+      assert {:error, _} = Ash.update(stale, %{}, action: :advance_validated, authorize?: false)
+      assert guarded_state(stale) == :paid
+    end
+
+    test "honours policies on the target", %{stale: stale} do
+      assert {:error, _} = Ash.update(stale, %{}, action: :advance_authorized, authorize?: true)
+      assert guarded_state(stale) == :paid
+    end
   end
 end

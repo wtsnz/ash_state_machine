@@ -83,3 +83,92 @@ defmodule RefetchedOrder do
     define :archive
   end
 end
+
+defmodule CopyStateToNote do
+  @moduledoc false
+  use Ash.Resource.Change
+
+  def change(changeset, _, _) do
+    Ash.Changeset.force_change_attribute(
+      changeset,
+      :note,
+      to_string(Ash.Changeset.get_attribute(changeset, :state))
+    )
+  end
+end
+
+defmodule GuardedOrder do
+  @moduledoc false
+  # `next_state/0` actions whose target is also used by later changes,
+  # validations and policies.
+  use Ash.Resource,
+    domain: Domain,
+    data_layer: Ash.DataLayer.Ets,
+    extensions: [AshStateMachine],
+    authorizers: [Ash.Policy.Authorizer]
+
+  state_machine do
+    initial_states([:open])
+    default_initial_state(:open)
+
+    transitions do
+      transition(:pay, from: :open, to: :paid)
+
+      for action <- [:advance_with_note, :advance_validated, :advance_authorized] do
+        transition(action, from: :open, to: :paid)
+        transition(action, from: :paid, to: :shipped)
+      end
+    end
+  end
+
+  policies do
+    policy action_type([:create, :read]) do
+      authorize_if always()
+    end
+
+    policy action([:pay, :advance_with_note, :advance_validated]) do
+      authorize_if always()
+    end
+
+    policy action(:advance_authorized) do
+      authorize_if changing_attributes(state: [to: :paid])
+    end
+  end
+
+  actions do
+    defaults [:read, :create]
+
+    update :pay do
+      change transition_state(:paid)
+    end
+
+    update :advance_with_note do
+      require_atomic? false
+      change Refetch
+      change next_state()
+      change CopyStateToNote
+    end
+
+    update :advance_validated do
+      require_atomic? false
+      change Refetch
+      change next_state()
+      validate attribute_equals(:state, :paid)
+    end
+
+    update :advance_authorized do
+      require_atomic? false
+      change Refetch
+      change next_state()
+    end
+  end
+
+  ets do
+    private? true
+  end
+
+  attributes do
+    uuid_primary_key :id
+    attribute :note, :string, public?: true
+  end
+end

@@ -6,22 +6,16 @@ defmodule AshStateMachine.BuiltinChanges.NextState do
   @moduledoc false
   use Ash.Resource.Change
 
-  def change(changeset, _opts, _) do
-    if AshStateMachine.BuiltinChanges.TransitionState.recheck_after_hooks?(changeset) do
-      changeset
-      |> next_state(require_stored_state?: false)
-      |> Ash.Changeset.before_action(&next_state(&1, []))
-    else
-      next_state(changeset, [])
-    end
-  end
-
-  defp next_state(changeset, opts) do
+  # The target is chosen from the record passed to the action, and then checked
+  # like `transition_state/1`'s, including again after an earlier lock. It isn't
+  # chosen again from the locked record: policies, validations and later changes
+  # have already seen this target.
+  def change(changeset, _opts, context) do
     changeset.data
     |> AshStateMachine.possible_next_states(changeset.action.name)
     |> case do
       [to] ->
-        AshStateMachine.transition_state(changeset, to, opts)
+        AshStateMachine.BuiltinChanges.TransitionState.change(changeset, [target: to], context)
 
       [] ->
         Ash.Changeset.add_error(changeset, "Cannot determine next state: no next state available")
